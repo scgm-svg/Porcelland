@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <title>Maialini d'Argento & Maialino d'Oro</title>
+  <style>
+    html,body{margin:0;height:100%;background:#0e1116;color:#e8eef7;font-family:system-ui,Arial}
+    .wrap{display:grid;place-items:center;height:100%}
+    canvas{background:#0e1116;border:1px solid #243043;border-radius:14px;touch-action:none}
+    .hud{
+      width:min(920px,95vw);display:flex;justify-content:space-between;align-items:center;
+      gap:10px;margin:10px 0 6px;flex-wrap:wrap
+    }
+    .pill{padding:8px 10px;border:1px solid #2b3a55;border-radius:999px;background:#131a24;font-weight:700}
+    .small{opacity:.85;font-size:12px}
+    .btn{background:#1f2a44;border:1px solid #2e3c5d;color:#e8eef7;padding:10px 12px;border-radius:12px;font-weight:800}
+    .btn:active{transform:translateY(1px)}
+    /* Mobile controls */
+    .mobile {
+      position: fixed; left: 0; right:0; bottom: 0;
+      padding: 14px; display:flex; justify-content:space-between; align-items:flex-end;
+      pointer-events:none;
+    }
+    .stick, .action { pointer-events:auto; }
+    .stick{
+      width:120px;height:120px;border-radius:999px;border:1px solid #2e3c5d;background:rgba(17,26,42,.65);
+      position:relative;
+    }
+    .knob{
+      width:44px;height:44px;border-radius:999px;background:rgba(232,238,247,.9);
+      position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    }
+    .action .btn{
+      padding:16px 16px;border-radius:16px; font-size:14px;
+    }
+    @media (min-width: 900px){
+      .mobile{display:none;}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hud">
+    <div class="pill">⭐ Punti: <span id="score">0</span> · 🐖 Cavalchi: <span id="mount">Nessuno</span></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" id="start">Avvia</button>
+      <button class="btn" id="reset">Reset</button>
+    </div>
+  </div>
+  <canvas id="c" width="920" height="520"></canvas>
+  <div class="small">Obiettivo: cavalca un maialino d’argento (Ino/One/Uccio/Accio) e trova il maialino d’oro. PC: WASD/frecce, Spazio = scendi.</div>
+</div>
+
+<!-- Mobile controls -->
+<div class="mobile">
+  <div class="stick" id="stick">
+    <div class="knob" id="knob"></div>
+  </div>
+  <div class="action">
+    <button class="btn" id="dismountBtn">SCENDI</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+
+  const scoreEl = document.getElementById("score");
+  const mountEl = document.getElementById("mount");
+  const startBtn = document.getElementById("start");
+  const resetBtn = document.getElementById("reset");
+  const dismountBtn = document.getElementById("dismountBtn");
+
+  // Minimal palette
+  const COL_BG = "#0e1116";
+  const COL_GRID = "rgba(255,255,255,0.05)";
+  const COL_PLAYER = "#e8eef7";
+  const COL_SILVER = "#b8c2cf";
+  const COL_GOLD = "#f7d35c";
+  const COL_TEXT = "#e8eef7";
+
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist2 = (ax,ay,bx,by)=>((ax-bx)**2+(ay-by)**2);
+  const rand = (a,b)=>a+Math.random()*(b-a);
+
+  // World is bigger than screen, camera follows player
+  const WORLD_W = 2200;
+  const WORLD_H = 1400;
+
+  let running = false;
+  let won = false;
+  let score = 0;
+
+  const keys = new Set();
+  window.addEventListener("keydown", e => {
+    keys.add(e.key.toLowerCase());
+    if (e.key === " "){ e.preventDefault(); tryDismount(); }
+  });
+  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+  // Touch / mobile joystick
+  const stick = document.getElementById("stick");
+  const knob = document.getElementById("knob");
+  let stickActive = false;
+  let stickVec = {x:0,y:0};
+
+  function setKnob(x,y){
+    const r = 48; // max knob radius
+    const d = Math.hypot(x,y);
+    const s = d > r ? r/d : 1;
+    const kx = x*s, ky = y*s;
+    knob.style.transform = `translate(${kx}px, ${ky}px) translate(-50%,-50%)`;
+    stickVec.x = clamp(kx/r, -1, 1);
+    stickVec.y = clamp(ky/r, -1, 1);
+  }
+
+  function stickPos(e){
+    const rect = stick.getBoundingClientRect();
+    const cx = rect.left + rect.width/2;
+    const cy = rect.top + rect.height/2;
+    const px = (e.touches ? e.touches[0].clientX : e.clientX) - cx;
+    const py = (e.touches ? e.touches[0].clientY : e.clientY) - cy;
+    return {x:px,y:py};
+  }
+
+  function stickStart(e){ stickActive = true; const p=stickPos(e); setKnob(p.x,p.y); e.preventDefault(); }
+  function stickMove(e){ if(!stickActive) return; const p=stickPos(e); setKnob(p.x,p.y); e.preventDefault(); }
+  function stickEnd(){ stickActive = false; setKnob(0,0); }
+
+  stick.addEventListener("touchstart", stickStart, {passive:false});
+  stick.addEventListener("touchmove", stickMove, {passive:false});
+  stick.addEventListener("touchend", stickEnd, {passive:true});
+  stick.addEventListener("mousedown", stickStart);
+  window.addEventListener("mousemove", stickMove);
+  window.addEventListener("mouseup", stickEnd);
+
+  dismountBtn.addEventListener("click", tryDismount);
+
+  // Entities
+  const player = {
+    x: WORLD_W/2, y: WORLD_H/2,
+    r: 14,
+    baseSpeed: 210, // px/sec
+    speed: 210,
+    vx:0, vy:0
+  };
+
+  const silverNames = ["Ino","One","Uccio","Accio"];
+  const silvers = silverNames.map((name,i)=>({
+    name,
+    x: rand(300, WORLD_W-300),
+    y: rand(300, WORLD_H-300),
+    r: 16,
+    vx: rand(-60,60),
+    vy: rand(-60,60),
+    mounted: false
+  }));
+
+  const gold = {
+    x: rand(250, WORLD_W-250),
+    y: rand(250, WORLD_H-250),
+    r: 15,
+    active: false // appears only after you mount a silver pig
+  };
+
+  let mountedPig = null;
+
+  function resetGame(){
+    running = false; won = false; score = 0;
+    player.x = WORLD_W/2; player.y = WORLD_H/2;
+    mountedPig = null;
+    player.speed = player.baseSpeed;
+    silvers.forEach(p=>{
+      p.x = rand(300, WORLD_W-300);
+      p.y = rand(300, WORLD_H-300);
+      p.vx = rand(-70,70);
+      p.vy = rand(-70,70);
+      p.mounted = false;
+    });
+    gold.x = rand(250, WORLD_W-250);
+    gold.y = rand(250, WORLD_H-250);
+    gold.active = false;
+    scoreEl.textContent = "0";
+    mountEl.textContent = "Nessuno";
+    draw();
+  }
+
+  function tryMount(){
+    if (mountedPig) return;
+    for (const p of silvers){
+      if (p.mounted) continue;
+      if (dist2(player.x, player.y, p.x, p.y) <= (player.r+p.r+6)**2){
+        p.mounted = true;
+        mountedPig = p;
+        player.speed = player.baseSpeed * 1.35; // little boost
+        mountEl.textContent = p.name;
+        gold.active = true;
+        return;
+      }
+    }
+  }
+
+  function tryDismount(){
+    if (!mountedPig) return;
+    mountedPig.mounted = false;
+    mountedPig.x = clamp(player.x - player.vx*0.25, 80, WORLD_W-80);
+    mountedPig.y = clamp(player.y - player.vy*0.25, 80, WORLD_H-80);
+    mountedPig.vx = rand(-60,60);
+    mountedPig.vy = rand(-60,60);
+    mountedPig = null;
+    player.speed = player.baseSpeed;
+    mountEl.textContent = "Nessuno";
+  }
+
+  function update(dt){
+    if (!running || won) return;
+
+    let ix = 0, iy = 0;
+
+    if (keys.has("arrowleft") || keys.has("a")) ix -= 1;
+    if (keys.has("arrowright") || keys.has("d")) ix += 1;
+    if (keys.has("arrowup") || keys.has("w")) iy -= 1;
+    if (keys.has("arrowdown") || keys.has("s")) iy += 1;
+
+    if (Math.abs(stickVec.x) + Math.abs(stickVec.y) > 0.05){
+      ix = stickVec.x;
+      iy = stickVec.y;
+    }
+
+    const m = Math.hypot(ix,iy) || 1;
+    ix /= m; iy /= m;
+
+    player.vx = ix * player.speed;
+    player.vy = iy * player.speed;
+
+    player.x = clamp(player.x + player.vx*dt, 40, WORLD_W-40);
+    player.y = clamp(player.y + player.vy*dt, 40, WORLD_H-40);
+
+    for (const p of silvers){
+      if (p.mounted) continue;
+
+      p.vx += rand(-18,18)*dt;
+      p.vy += rand(-18,18)*dt;
+
+      const sp = Math.hypot(p.vx,p.vy);
+      const maxSp = 120;
+      if (sp > maxSp){ p.vx = p.vx/sp*maxSp; p.vy = p.vy/sp*maxSp; }
+
+      p.x += p.vx*dt;
+      p.y += p.vy*dt;
+
+      if (p.x < 70 || p.x > WORLD_W-70) p.vx *= -1;
+      if (p.y < 70 || p.y > WORLD_H-70) p.vy *= -1;
+      p.x = clamp(p.x, 70, WORLD_W-70);
+      p.y = clamp(p.y, 70, WORLD_H-70);
+    }
+
+    if (mountedPig){
+      mountedPig.x = player.x;
+      mountedPig.y = player.y + 18;
+    }
+
+    tryMount();
+
+    if (mountedPig) score += 30*dt; else score += 10*dt;
+    scoreEl.textContent = Math.floor(score).toString();
+
+    if (gold.active && mountedPig){
+      if (dist2(player.x, player.y, gold.x, gold.y) <= (player.r+gold.r+8)**2){
+        won = true;
+        running = false;
+      }
+    }
+  }
+
+  function worldToScreen(wx,wy,cam){
+    return { x: wx - cam.x, y: wy - cam.y };
+  }
+
+  function drawGrid(cam){
+    ctx.save();
+    ctx.strokeStyle = COL_GRID;
+    ctx.lineWidth = 1;
+
+    const step = 80;
+    const startX = Math.floor(cam.x/step)*step;
+    const startY = Math.floor(cam.y/step)*step;
+
+    for (let x=startX; x<cam.x+W; x+=step){
+      const sx = x - cam.x;
+      ctx.beginPath(); ctx.moveTo(sx,0); ctx.lineTo(sx,H); ctx.stroke();
+    }
+    for (let y=startY; y<cam.y+H; y+=step){
+      const sy = y - cam.y;
+      ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(W,sy); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawPig(p, cam, color){
+    const s = worldToScreen(p.x,p.y,cam);
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y, 22, 16, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(s.x+16, s.y+2, 7, 6, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(s.x-6, s.y-14); ctx.lineTo(s.x-14, s.y-26); ctx.lineTo(s.x-1, s.y-18);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(s.x+2, s.y-14); ctx.lineTo(s.x-2, s.y-26); ctx.lineTo(s.x+10, s.y-18);
+    ctx.fill();
+
+    ctx.fillStyle = COL_TEXT;
+    ctx.font = "700 12px system-ui, Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(p.name, s.x, s.y - 26);
+  }
+
+  function drawPlayer(cam){
+    const s = worldToScreen(player.x, player.y, cam);
+
+    ctx.fillStyle = COL_PLAYER;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y-18, 10, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(232,238,247,0.85)";
+    ctx.fillRect(s.x-7, s.y-8, 14, 26);
+
+    ctx.fillStyle = "rgba(232,238,247,0.6)";
+    ctx.fillRect(s.x-7, s.y+18, 5, 12);
+    ctx.fillRect(s.x+2, s.y+18, 5, 12);
+  }
+
+  function drawGold(cam){
+    const s = worldToScreen(gold.x, gold.y, cam);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = COL_GOLD;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y, 22, 16, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 34, 0, Math.PI*2);
+    ctx.fillStyle = COL_GOLD;
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COL_TEXT;
+    ctx.font = "800 12px system-ui, Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("ORO", s.x, s.y - 26);
+    ctx.restore();
+  }
+
+  function drawOverlay(){
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0,0,W,H);
+
+    ctx.fillStyle = COL_TEXT;
+    ctx.textAlign = "center";
+
+    if (!running && !won){
+      ctx.font = "900 30px system-ui, Arial";
+      ctx.fillText("Maialini d’Argento", W/2, H/2 - 30);
+      ctx.font = "700 16px system-ui, Arial";
+      ctx.fillText("Cavalca Ino/One/Uccio/Accio, poi trova il maialino d’oro.", W/2, H/2 + 6);
+      ctx.font = "700 14px system-ui, Arial";
+      ctx.fillText("Premi Avvia • PC: WASD/Frecce • Spazio = scendi", W/2, H/2 + 34);
+    }
+
+    if (won){
+      ctx.font = "1000 34px system-ui, Arial";
+      ctx.fillText("HAI PRESO IL MAIALINO D’ORO! 🏆", W/2, H/2 - 10);
+      ctx.font = "700 16px system-ui, Arial";
+      ctx.fillText("Reset per rigiocare.", W/2, H/2 + 24);
+    }
+    ctx.restore();
+  }
+
+  function draw(){
+    const cam = {
+      x: clamp(player.x - W/2, 0, WORLD_W - W),
+      y: clamp(player.y - H/2, 0, WORLD_H - H)
+    };
+
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = COL_BG;
+    ctx.fillRect(0,0,W,H);
+
+    drawGrid(cam);
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(232,238,247,0.10)";
+    ctx.strokeRect(-cam.x+20, -cam.y+20, WORLD_W-40, WORLD_H-40);
+    ctx.restore();
+
+    for (const p of silvers){
+      if (p.mounted) continue;
+      drawPig(p, cam, COL_SILVER);
+    }
+
+    if (gold.active) drawGold(cam);
+
+    if (mountedPig){
+      drawPig(mountedPig, cam, COL_SILVER);
+    }
+    drawPlayer(cam);
+
+    if (gold.active && !won){
+      const dx = gold.x - player.x;
+      const dy = gold.y - player.y;
+      const ang = Math.atan2(dy, dx);
+      const cx = W - 70, cy = 60;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(ang);
+      ctx.fillStyle = COL_GOLD;
+      ctx.beginPath();
+      ctx.moveTo(24,0); ctx.lineTo(0,-10); ctx.lineTo(0,10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = "rgba(232,238,247,0.75)";
+      ctx.font = "700 12px system-ui, Arial";
+      ctx.textAlign = "right";
+      ctx.fillText("Direzione ORO →", W-20, 60);
+    }
+
+    if (!running || won) drawOverlay();
+  }
+
+  // Main loop
+  let last = performance.now();
+  function loop(t){
+    const dt = clamp((t - last)/1000, 0, 0.033);
+    last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  startBtn.addEventListener("click", ()=>{
+    if (won) return;
+    running = true;
+  });
+  resetBtn.addEventListener("click", resetGame);
+
+  canvas.addEventListener("pointerdown", ()=>{
+    if (!running && !won) running = true;
+    tryMount();
+  });
+
+  resetGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
